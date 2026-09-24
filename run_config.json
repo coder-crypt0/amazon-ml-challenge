@@ -1,0 +1,11 @@
+{
+  "samples": 12000,
+  "trees": 450,
+  "top_k": 32,
+  "max_postings": 150,
+  "workers": 6,
+  "batch_size": 512,
+  "country_transfer": true,
+  "xgboost_device": "cpu",
+  "seed": 20260925
+}

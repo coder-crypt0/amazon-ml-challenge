@@ -1,0 +1,139 @@
+{
+  "files": {
+    "student_resource/dataset/train/train_source1.tsv": {
+      "rows": 2206821,
+      "columns": [
+        "entity_id",
+        "business_name",
+        "business_address",
+        "country"
+      ],
+      "missing": {},
+      "unique": {
+        "entity_id": 2206821
+      },
+      "country_counts": {
+        "US": 1323633,
+        "India": 883188
+      }
+    },
+    "student_resource/dataset/train/train_source2.tsv": {
+      "rows": 5034616,
+      "columns": [
+        "entity_id",
+        "business_name",
+        "business_address",
+        "country"
+      ],
+      "missing": {
+        "business_address": 168967
+      },
+      "unique": {
+        "entity_id": 5034616
+      },
+      "country_counts": {
+        "India": 2017799,
+        "US": 3016817
+      }
+    },
+    "student_resource/dataset/train/train_source3.tsv": {
+      "rows": 5285603,
+      "columns": [
+        "entity_id",
+        "business_name",
+        "business_address",
+        "country"
+      ],
+      "missing": {
+        "business_address": 175916
+      },
+      "unique": {
+        "entity_id": 5285603
+      },
+      "country_counts": {
+        "US": 3170056,
+        "India": 2115547
+      }
+    },
+    "student_resource/dataset/test/test_source1.tsv": {
+      "rows": 1732544,
+      "columns": [
+        "entity_id",
+        "business_name",
+        "business_address",
+        "country"
+      ],
+      "missing": {},
+      "unique": {
+        "entity_id": 1732544
+      },
+      "country_counts": {
+        "US": 663106,
+        "France": 259452,
+        "India": 809986
+      }
+    },
+    "student_resource/dataset/test/test_source2.tsv": {
+      "rows": 4887273,
+      "columns": [
+        "entity_id",
+        "business_name",
+        "business_address",
+        "country"
+      ],
+      "missing": {
+        "business_address": 129408
+      },
+      "unique": {
+        "entity_id": 4887273
+      },
+      "country_counts": {
+        "India": 2312565,
+        "France": 703378,
+        "US": 1871330
+      }
+    },
+    "student_resource/dataset/test/test_source3.tsv": {
+      "rows": 5082316,
+      "columns": [
+        "entity_id",
+        "business_name",
+        "business_address",
+        "country"
+      ],
+      "missing": {
+        "business_address": 136098
+      },
+      "unique": {
+        "entity_id": 5082316
+      },
+      "country_counts": {
+        "India": 2405000,
+        "France": 731615,
+        "US": 1945701
+      }
+    }
+  },
+  "truth": {
+    "rows": 2206821,
+    "source1_unique": 2206821,
+    "matched_entity_unique": 7638365,
+    "missing_or_empty_rows": 123247,
+    "duplicate_target_rows": 0,
+    "matched_cardinality": {
+      "5": 321957,
+      "4": 484115,
+      "3": 530841,
+      "6": 164868,
+      "2": 375212,
+      "7": 63968,
+      "0": 123247,
+      "1": 119157,
+      "8": 18680,
+      "9": 4205,
+      "10": 534,
+      "11": 37
+    }
+  },
+  "notes": []
+}

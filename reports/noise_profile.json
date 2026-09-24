@@ -1,0 +1,15 @@
+{
+  "sample_source1_rows": 1000,
+  "positive_pairs": 3444,
+  "target_source_counts": {
+    "S2": 1657,
+    "S3": 1787
+  },
+  "normalized_exact_match": {
+    "name_and_address": 37,
+    "name_only": 762,
+    "address_only": 276,
+    "neither": 2369
+  },
+  "pairs_with_missing_address": 147
+}

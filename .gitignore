@@ -1,0 +1,19 @@
+# Supplied competition data and local experiment artifacts
+student_resource/
+*.zip
+data/
+artifacts/
+output/
+submission/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.env
+.env.*
+!.env.example
+.DS_Store
+MOONLIGHT.md
+.codex/MOONLIGHT.md
+.agent/MOONLIGHT.md
+*.log
