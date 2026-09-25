@@ -1,0 +1,10 @@
+anyascii==0.3.3
+sparse-dot-topn==1.1.5
+rapidfuzz==3.14.3
+polars==1.39.3
+xgboost==3.0.5
+matplotlib==3.10.7
+cupy-cuda12x==14.2.0
+tabm==0.0.3
+rtdl_num_embeddings==0.0.12
+transformers==4.56.2

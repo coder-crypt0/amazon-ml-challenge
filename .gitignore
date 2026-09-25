@@ -17,3 +17,9 @@ MOONLIGHT.md
 .codex/MOONLIGHT.md
 .agent/MOONLIGHT.md
 *.log
+scripts/benchmark_*.py
+scripts/diagnose_misses.py
+scripts/eval_*pilot.py
+scripts/eval_wide.py
+scripts/run_gpu100_*pilot.py
+scripts/run_cner_pilot.py
