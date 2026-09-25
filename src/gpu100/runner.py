@@ -196,33 +196,73 @@ def _fit_booster(params,train,tune,model_path,rounds):
     return booster
 
 
+def _sample_ranker_rows(x,y,offsets,rng,hard_per_query=64,random_per_query=16):
+    """Keep every true link, confusing lexical negatives, and a small random tail."""
+    selected=[]
+    for start,end in zip(offsets[:-1],offsets[1:]):
+        start,end=int(start),int(end)
+        if start==end:continue
+        local=np.arange(start,end,dtype=np.int64)
+        positives=local[y[start:end]>0]
+        negatives=local[y[start:end]==0]
+        if len(negatives)>hard_per_query:
+            features=x[negatives]
+            hardness=(.45*features[:,2]+.20*features[:,3]
+                      +.20*features[:,18]+.15*features[:,19])
+            hard=negatives[np.argpartition(hardness,-hard_per_query)[-hard_per_query:]]
+            remaining=np.setdiff1d(negatives,hard,assume_unique=True)
+        else:
+            hard=negatives
+            remaining=np.empty(0,dtype=np.int64)
+        if len(remaining)>random_per_query:
+            remaining=rng.choice(remaining,size=random_per_query,replace=False)
+        selected.extend(positives)
+        selected.extend(hard)
+        selected.extend(remaining)
+    return np.asarray(selected,dtype=np.int64)
+
+
 def train_ranker(raw_paths,root,train_end,tune_end,trees=400,threads=4,device="cuda",seed=42):
     import xgboost as xgb
     root=Path(root);model_path=root/"ranker.ubj"
     if model_path.with_suffix(".complete").exists():
         model=xgb.Booster(model_file=str(model_path));model.set_param({"device":device,"nthread":threads});return model
     X=[];y=[];x_tune=[];y_tune=[]
+    rng=np.random.default_rng(seed+11)
     query_position=0
     for path in raw_paths:
         with np.load(path) as part:
             rows=len(part["qrows"])
-            fit_rows=np.repeat(np.arange(query_position,query_position+rows)<train_end,np.diff(part["offsets"]))
-            tune_rows=np.repeat((np.arange(query_position,query_position+rows)>=train_end)&
-                       (np.arange(query_position,query_position+rows)<tune_end),np.diff(part["offsets"]))
-            X.append(part["X"][fit_rows]);y.append(part["y"][fit_rows])
-            if tune_rows.any():x_tune.append(part["X"][tune_rows]);y_tune.append(part["y"][tune_rows])
+            if query_position>=tune_end:break
+            features=part["X"];labels=part["y"];offsets=part["offsets"]
+            selected=_sample_ranker_rows(features,labels,offsets,rng)
+            query_ids=query_position+np.searchsorted(offsets,selected,side="right")-1
+            fit_rows=query_ids<train_end
+            tune_rows=(query_ids>=train_end)&(query_ids<tune_end)
+            X.append(features[selected[fit_rows]]);y.append(labels[selected[fit_rows]])
+            if tune_rows.any():
+                x_tune.append(features[selected[tune_rows]])
+                y_tune.append(labels[selected[tune_rows]])
             query_position+=rows
     train_x=np.concatenate(X);train_y=np.concatenate(y)
     valid_x=np.concatenate(x_tune);valid_y=np.concatenate(y_tune)
-    print(f"GPU ranker fitting {len(train_x):,} candidates, {int(train_y.sum()):,} positives",flush=True)
+    del X,y,x_tune,y_tune
+    import gc
+    gc.collect()
+    fit_pairs=len(train_x);positive_fit_pairs=int(train_y.sum());tune_pairs=len(valid_x)
+    print(f"GPU ranker fitting {fit_pairs:,} sampled candidates, {positive_fit_pairs:,} positives",flush=True)
     params=dict(objective="binary:logistic",eval_metric="logloss",tree_method="hist",device=device,
                 max_depth=7,min_child_weight=12,learning_rate=.06,subsample=.85,colsample_bytree=.9,
                 reg_lambda=3,seed=seed,nthread=threads)
     train=xgb.QuantileDMatrix(train_x,label=train_y,feature_names=list(CHEAP_NAMES))
     valid=xgb.QuantileDMatrix(valid_x,label=valid_y,ref=train,feature_names=list(CHEAP_NAMES))
+    del train_x,train_y,valid_x,valid_y
+    gc.collect()
     model=_fit_booster(params,train,valid,model_path,trees)
-    _json(root/"ranker_report.json",{"trees":model.num_boosted_rounds(),"fit_pairs":len(train_x),
-                                        "positive_fit_pairs":int(train_y.sum()),"tune_pairs":len(valid_x)})
+    _json(root/"ranker_report.json",{"trees":model.num_boosted_rounds(),"fit_pairs":fit_pairs,
+                                        "positive_fit_pairs":positive_fit_pairs,"tune_pairs":tune_pairs,
+                                        "sampling":{"hard_per_query":64,"random_per_query":16,
+                                                    "all_positive_links_kept":True}})
     return model
 
 
@@ -693,14 +733,24 @@ def compact_training_cache(root):
     import shutil
     removed=[]
     for name in ("train_index","train_raw","train_final"):
-        directory=(root/name).resolve()
+        entry=root/name
+        if entry.is_symlink():
+            entry.unlink()
+            removed.append(name)
+            continue
+        directory=entry.resolve()
         if not directory.is_relative_to(root) or directory==root:
             raise ValueError("Invalid cache path")
         if directory.is_dir():
             shutil.rmtree(directory)
             removed.append(name)
     for name in ("train_targets.arrow","train_queries.arrow"):
-        path=(root/name).resolve()
+        entry=root/name
+        if entry.is_symlink():
+            entry.unlink()
+            removed.append(name)
+            continue
+        path=entry.resolve()
         if not path.is_relative_to(root):
             raise ValueError("Invalid corpus path")
         if path.exists():
@@ -743,13 +793,13 @@ def main():
     prepared=None
     for stage in stages:
         started=time.monotonic();print(f"Stage {stage} starting",flush=True)
-        if stage in ("prepare","preflight","raw","ranker","final","matcher"):
+        if stage in ("prepare","preflight","raw","final"):
             if prepared is None:
                 prepared=prepare(a.data,root,a.samples,a.seed,a.cap_rate,a.dimension,a.channel_extra)
             queries,targets,chosen,truth,views=prepared
         else:
             prepared=None
-            if stage in ("compact","test") and "queries" in locals():
+            if stage in ("ranker","matcher","compact","test") and "queries" in locals():
                 import gc
                 del queries,targets,chosen,truth,views
                 gc.collect()
@@ -768,6 +818,9 @@ def main():
             final_training(queries,targets,chosen,truth,sorted((root/"train_raw").glob("[0-9]*.npz")),
                            ranker,views,root,a.final_k,a.threads,a.device)
         elif stage=="matcher":
+            queries=Corpus.load(root/"train_queries.arrow")
+            chosen=np.load(root/"sample_rows.npy")
+            truth=json.loads((root/"sample_truth.json").read_text(encoding="utf-8"))
             print(json.dumps(train_matcher(queries,chosen,truth,sorted((root/"train_final").glob("[0-9]*.npz")),
                           root,a.epochs,8192,a.device,a.seed,a.trees,a.threads),indent=2),flush=True)
         elif stage=="ownership":print(json.dumps(tune_ownership(root),indent=2),flush=True)

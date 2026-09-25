@@ -6,7 +6,7 @@ from gpu100.cheap import CHEAP_NAMES, flatten_retrieval, select_top_rows
 from gpu100.features import FEATURE_NAMES, enrich
 from gpu100.setmodel import macro_f05, make_network
 from gpu100.expand import expand
-from gpu100.runner import compact_training_cache
+from gpu100.runner import compact_training_cache,_sample_ranker_rows,train_ranker
 from gpu100.noisy_channel import NoisyChannel, CHANNEL_FEATURE_NAMES
 from gpu100.reciprocal import owners_from_arrays,reverse_features,tuning_result
 from gpu100.tail import ambiguous_queries,tail_pairs
@@ -83,6 +83,56 @@ def test_compaction_keeps_models_and_reports(tmp_path):
     assert not (root/"train_index").exists()
     assert (root/"ranker.ubj").read_bytes()==b"model"
     assert (root/"validation.json").is_file()
+
+
+def test_ranker_sampling_keeps_positives_and_confusing_negatives():
+    x=np.zeros((241,len(CHEAP_NAMES)),dtype=np.float32)
+    y=np.zeros(241,dtype=np.uint8)
+    y[[3,89,160]]=1
+    x[:,2]=np.arange(241,dtype=np.float32)/241
+    offsets=np.asarray([0,120,120,241])
+    chosen=_sample_ranker_rows(x,y,offsets,np.random.default_rng(7),hard_per_query=4,random_per_query=2)
+    assert {3,89,160,116,117,118,119,237,238,239,240}.issubset(set(chosen))
+    assert len(chosen)==15
+    assert len(set(chosen))==len(chosen)
+    assert np.array_equal(chosen,_sample_ranker_rows(x,y,offsets,np.random.default_rng(7),4,2))
+
+
+def test_ranker_fits_bounded_sample_from_saved_candidates(tmp_path):
+    import json
+    root=tmp_path/"run"
+    root.mkdir()
+    rng=np.random.default_rng(21)
+    x=rng.random((6*120,len(CHEAP_NAMES)),dtype=np.float32)
+    y=np.zeros(len(x),dtype=np.uint8)
+    y[np.arange(6)*120+3]=1
+    path=root/"raw.npz"
+    np.savez_compressed(path,qrows=np.arange(6),rows=np.arange(len(x)),
+                        offsets=np.arange(7)*120,X=x,y=y)
+    model=train_ranker([path],root,train_end=4,tune_end=6,trees=2,threads=2,device="cpu")
+    report=json.loads((root/"ranker_report.json").read_text())
+    assert model.num_boosted_rounds()==2
+    assert report["fit_pairs"]<=4*81
+    assert report["positive_fit_pairs"]==4
+    assert report["tune_pairs"]<=2*81
+
+
+def test_compaction_unlinks_resume_cache_without_touching_checkpoint(tmp_path):
+    import pytest
+    source=tmp_path/"prior"/"train_raw"
+    source.mkdir(parents=True)
+    (source/"00000.npz").write_bytes(b"checkpoint")
+    root=tmp_path/"new"
+    root.mkdir()
+    try:
+        (root/"train_raw").symlink_to(source,target_is_directory=True)
+    except OSError:
+        pytest.skip("Directory symlinks unavailable")
+    (root/"validation.json").write_text("{}")
+    (root/"calibration.json").write_text("{}")
+    assert "train_raw" in compact_training_cache(root)
+    assert not (root/"train_raw").exists()
+    assert (source/"00000.npz").read_bytes()==b"checkpoint"
 
 
 def test_channel_uses_only_fit_positives_and_keeps_sources_separate(tmp_path):

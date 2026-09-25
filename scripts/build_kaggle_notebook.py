@@ -84,6 +84,37 @@ if not SMOKE:
 print("Versions:",{"python":sys.version.split()[0],"numpy":numpy.__version__,"scipy":scipy.__version__,
                    "sklearn":sklearn.__version__,"xgboost":xgboost.__version__,"torch":torch.__version__,
                    "cupy":cupy.__version__ if not SMOKE else None})''')
+md('''## 1a. Resume the failed run without copying 9 GB of caches
+Attach the **Version 2 output** of the earlier `CNER_Kaggle` notebook as an additional Kaggle input. The previous run completed all 235 raw-candidate batches before its ranker ran out of RAM. This cell verifies that output and mounts its immutable training caches, while new models and results are written to this notebook's working directory.''')
+code('''if not SMOKE and not (ROOT/"train_raw").exists() and not (ROOT/"compaction.json").exists():
+    prior_sha="2d2168e2891a864b9a190a668074bd51a46aab4c2092442bdfb11fd8ba5287e4"
+    prior=[]
+    for path in Path("/kaggle/input").rglob("source_manifest.json"):
+        if path.parent.name!=RUN_NAME:continue
+        try: saved=json.loads(path.read_text())
+        except (OSError,ValueError):continue
+        if saved.get("source_sha256")==prior_sha:prior.append(path.parent)
+    if len(prior)!=1:
+        raise FileNotFoundError("Attach exactly one Version 2 CNER_Kaggle Notebook Output to resume the 235 saved batches")
+    previous=prior[0]
+    expected=235
+    raw_files=list((previous/"train_raw").glob("[0-9]*.npz"))
+    assert len(raw_files)==expected and (previous/"train_raw"/"00234.npz").is_file(),"Previous run's raw batches are incomplete"
+    small=("config.json","hyperparameters.json","environment.json","dataset_manifest.json",
+           "split.json","sample_rows.npy","sample_truth.json","channel_extra_rows.npy",
+           "noisy_channel.json","noisy_channel_profile.json","retrieval_config.json","runtime.json")
+    heavy=("train_queries.arrow","train_targets.arrow","train_index","train_raw")
+    for name in small:
+        source=previous/name
+        assert source.is_file(),f"Missing resume checkpoint {source}"
+        shutil.copy2(source,ROOT/name)
+    for name in heavy:
+        source=previous/name
+        assert source.exists(),f"Missing resume checkpoint {source}"
+        os.symlink(source,ROOT/name,target_is_directory=source.is_dir())
+    (ROOT/"resume_manifest.json").write_text(json.dumps({"prior_source_sha256":prior_sha,
+        "raw_batches":len(raw_files),"cache_mode":"read_only_symlinks"},indent=2))
+    print("Resumed",len(raw_files),"raw batches from Kaggle Version 2 output")''')
 md('''## 2. Install the source bundled in this notebook
 The SHA-256 fingerprint ensures that code and checkpoints belong to the same run. Changing the notebook source/configuration requires a new `RUN_NAME`.''')
 code(f'''SOURCE_SHA256={digest!r}
@@ -162,6 +193,9 @@ md('''## 4. Stage runner
 Completed stages and batches are saved under `ROOT`. Rerunning with the same input/settings skips completed chunks. The runtime printout makes the 5½-hour budget visible.''')
 code('''DEVICE="cpu" if SMOKE else "cuda"
 def run(stage):
+    if (ROOT/"resume_manifest.json").exists() and stage in ("prepare","preflight","raw"):
+        print(f"{stage}: verified Version 2 checkpoints found; skipping completed work")
+        return
     if (ROOT/"compaction.json").exists() and stage in ("prepare","preflight","raw","ranker","final","matcher","ownership","tail","collective","compact"):
         print(f"{stage}: training completed and caches compacted; resuming from saved models")
         return
