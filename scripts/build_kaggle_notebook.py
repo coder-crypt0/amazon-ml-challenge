@@ -221,4 +221,3 @@ nbf.validate(nb)
 path=root/'CNER_Kaggle.ipynb'
 nbf.write(nb,path)
 print(path, 'cells',len(cells),'bytes',path.stat().st_size,'sha256',digest)
-
