@@ -32,7 +32,7 @@ class PairClassifier:
         self.params=params
         self.model=None
 
-    def fit_classifier(self,X,y,seed=42,threads=6,checkpoint=None):
+    def fit_classifier(self,X,y,seed=42,threads=6,checkpoint=None,feature_names=None):
         import lightgbm as lgb
         from .features import FEATURE_NAMES
         params=dict(objective="binary",learning_rate=.045,num_leaves=47,min_data_in_leaf=40,
@@ -40,7 +40,7 @@ class PairClassifier:
                     seed=seed,num_threads=threads,verbosity=-1,deterministic=True,force_col_wise=True)
         rounds=self.params.pop("n_estimators",450)
         params.update(self.params)
-        dataset=lgb.Dataset(X,label=y,feature_name=list(FEATURE_NAMES),free_raw_data=False)
+        dataset=lgb.Dataset(X,label=y,feature_name=list(feature_names or FEATURE_NAMES),free_raw_data=False)
         if checkpoint and restore_file(checkpoint):
             self.model=lgb.Booster(model_file=str(checkpoint))
         done=self.model.current_iteration() if self.model is not None else 0
@@ -73,14 +73,14 @@ class PairClassifier:
         return result
 
 
-def train_xgboost(X,y,checkpoint,device="cuda",rounds=500,seed=42,threads=4):
+def train_xgboost(X,y,checkpoint,device="cuda",rounds=500,seed=42,threads=4,feature_names=None):
     """Resume in 50-tree units; CUDA histogram training when requested."""
     import xgboost as xgb
     from .features import FEATURE_NAMES
     params=dict(objective="binary:logistic",tree_method="hist",device=device,max_depth=7,
                 learning_rate=.045,min_child_weight=8,subsample=.9,colsample_bytree=.9,
                 reg_lambda=3.,seed=seed,nthread=threads)
-    train=xgb.QuantileDMatrix(X,label=y,feature_names=list(FEATURE_NAMES),max_bin=256)
+    train=xgb.QuantileDMatrix(X,label=y,feature_names=list(feature_names or FEATURE_NAMES),max_bin=256)
     model=None
     if restore_file(checkpoint):
         model=xgb.Booster(model_file=str(checkpoint))

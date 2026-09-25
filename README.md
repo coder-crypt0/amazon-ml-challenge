@@ -2,6 +2,20 @@
 
 Resumable multi-pass retrieval, 47-feature LightGBM/XGBoost matching, macro-F0.5 calibration, and validation-selected target exclusivity. Uses supplied data only. Country labels are open strings, including unseen France.
 
+## v3: IDF token retrieval (recommended)
+
+v3 learns a native-script → Latin token table from training pairs (`ber.translit`), retrieves candidates by summed IDF of shared name/address/house-number tokens (`ber.retrieval`, top-50 overall plus top-10 by name), and scores 92 features: the 47 base features plus IDF, house-number, domain-form, candidate-context and out-of-fold name-word odds features (`ber.features3`). Local 5-fold validation on 10k training references: candidate recall 0.899 → 0.967 and macro F0.5 0.912 → 0.969 against a replica of the earlier pipeline. France remains unmeasured.
+
+Colab: open `Business_Entity_Resolution_Colab_v3.ipynb` (build it with `python scripts/build_notebook_v3.py`), edit `DATA_ZIP`, run all cells. It writes `output/` (threshold) and `output_exclusive/` (each target assigned to at most one reference), each with an audited package.
+
+Local, one command (set `PYTHONPATH=src`; `run_config.json` supplies samples, trees, workers and seed):
+
+```sh
+python -m ber.reproduce3 --config run_config.json --data /path/to/dataset --device cpu [--exclusive]
+```
+
+Stages: `python -m ber.pipeline3 candidates|train`, `python -m ber.predict3 score|assemble`.
+
 ## Colab
 
 Open `Business_Entity_Resolution_Colab.ipynb`. Upload the original student-resource ZIP to Drive, select a GPU runtime, and edit `DATA_ZIP` in the configuration cell. Run cells in order. The notebook embeds the complete source; no GitHub login or separate code upload is needed.
