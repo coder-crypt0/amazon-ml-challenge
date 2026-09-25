@@ -105,39 +105,52 @@ os.environ["PYTHONPATH"]=str(CODE/"src")+os.pathsep+str(CODE)
 os.environ["PYTHONUTF8"]="1"
 if str(CODE/"src") not in sys.path:sys.path.insert(0,str(CODE/"src"))
 print("Source SHA-256:",SOURCE_SHA256)''')
-md('''## 3. Locate and extract the supplied dataset
-Attach the original ZIP as a private Kaggle Dataset. This cell finds it under `/kaggle/input`, verifies its SHA-256 against saved checkpoints, and extracts it to scratch space.''')
+md('''## 3. Locate the supplied dataset
+Attach the original archive as a private Kaggle Dataset. Kaggle may unpack ZIP uploads automatically; this cell accepts either the mounted archive or its extracted `student_resource/dataset` directory and fingerprints the mounted input before using checkpoints.''')
 code('''if SMOKE:
     DATA=Path(os.environ["GPU100_SMOKE_DATA"])
     dataset_sha256=hashlib.sha256((DATA/"train/train_source1.tsv").read_bytes()).hexdigest()
 else:
     candidate_zips=list(Path("/kaggle/input").rglob("6ab10eb3b23ba_student_resource.zip"))
-    if len(candidate_zips)!=1:
-        raise FileNotFoundError("Attach the supplied ZIP as a Kaggle Dataset; expected exactly one matching ZIP under /kaggle/input")
-    source_zip=candidate_zips[0]
-    archive_hash=hashlib.sha256()
-    with source_zip.open("rb") as archive_file:
-        for block in iter(lambda:archive_file.read(4*1024*1024),b""):
-            archive_hash.update(block)
-    dataset_sha256=archive_hash.hexdigest()
-    DATA=DATA_ROOT/"student_resource/dataset"
-    marker=DATA_ROOT/"COMPLETE"
-    if not marker.exists():
-        DATA_ROOT.mkdir(parents=True,exist_ok=True)
-        with zipfile.ZipFile(source_zip) as archive:
-            for item in archive.infolist():
-                parts=Path(item.filename).parts
-                if not parts or parts[0]!="student_resource" or item.is_dir() or Path(item.filename).name.startswith("."):
-                    continue
-                target=(DATA_ROOT/item.filename).resolve()
-                if not target.is_relative_to(DATA_ROOT.resolve()):raise ValueError("Unsafe ZIP path")
-                archive.extract(item,DATA_ROOT)
-        marker.write_text(dataset_sha256)
+    extracted=[p.parent.parent for p in Path("/kaggle/input").rglob("train_source1.tsv")
+               if p.parent.name=="train" and p.parent.parent.name=="dataset"]
+    if len(candidate_zips)==1:
+        source_zip=candidate_zips[0]
+        archive_hash=hashlib.sha256()
+        with source_zip.open("rb") as archive_file:
+            for block in iter(lambda:archive_file.read(4*1024*1024),b""):
+                archive_hash.update(block)
+        dataset_sha256=archive_hash.hexdigest()
+        DATA=DATA_ROOT/"student_resource/dataset"
+        marker=DATA_ROOT/"COMPLETE"
+        if not marker.exists():
+            DATA_ROOT.mkdir(parents=True,exist_ok=True)
+            with zipfile.ZipFile(source_zip) as archive:
+                for item in archive.infolist():
+                    parts=Path(item.filename).parts
+                    if not parts or parts[0]!="student_resource" or item.is_dir() or Path(item.filename).name.startswith("."):
+                        continue
+                    target=(DATA_ROOT/item.filename).resolve()
+                    if not target.is_relative_to(DATA_ROOT.resolve()):raise ValueError("Unsafe ZIP path")
+                    archive.extract(item,DATA_ROOT)
+            marker.write_text(dataset_sha256)
+        else:
+            assert marker.read_text()==dataset_sha256,"Input archive changed; use fresh scratch directory"
+    elif not candidate_zips and len(extracted)==1:
+        DATA=extracted[0]
+        input_hash=hashlib.sha256()
+        for relative in ("train/train_source1.tsv","train/train_source2.tsv","train/train_source3.tsv",
+                         "train/train_ground_truth.tsv","test/test_source1.tsv","test/test_source2.tsv","test/test_source3.tsv"):
+            input_hash.update(relative.encode())
+            with (DATA/relative).open("rb") as input_file:
+                for block in iter(lambda:input_file.read(4*1024*1024),b""):
+                    input_hash.update(block)
+        dataset_sha256=input_hash.hexdigest()
     else:
-        assert marker.read_text()==dataset_sha256,"Input archive changed; use fresh scratch directory"
+        raise FileNotFoundError("Attach exactly one original student-resource archive or extracted Kaggle dataset")
 dataset_manifest=ROOT/"dataset_manifest.json"
 if dataset_manifest.exists():
-    assert json.loads(dataset_manifest.read_text())["sha256"]==dataset_sha256,"Run checkpoint belongs to another dataset ZIP"
+    assert json.loads(dataset_manifest.read_text())["sha256"]==dataset_sha256,"Run checkpoint belongs to another dataset input"
 else:
     dataset_manifest.write_text(json.dumps({"sha256":dataset_sha256},indent=2))
 for required in ("train/train_source1.tsv","train/train_source2.tsv","train/train_source3.tsv",

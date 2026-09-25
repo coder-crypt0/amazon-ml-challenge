@@ -1,6 +1,6 @@
 # CNER: collective noisy-channel entity resolution
 
-`CNER_Kaggle.ipynb` is self-contained. Attach the original student-resource ZIP as a **private Kaggle Dataset**, enable a CUDA GPU and Internet for package/model downloads, then run cells in order. Business identities come only from the supplied ZIP. The pretrained multilingual reranker is a generic Apache-2.0 model, not a business lookup service.
+`CNER_Kaggle.ipynb` is self-contained. Upload the original student-resource ZIP as a **private Kaggle Dataset**, enable a CUDA GPU and Internet for package/model downloads, then run cells in order. Kaggle may unpack ZIP uploads automatically; the notebook accepts either the mounted ZIP or its extracted `student_resource/dataset` directory. Business identities come only from the supplied archive. The pretrained multilingual reranker is a generic Apache-2.0 model, not a business lookup service.
 
 The training split reproduces the original Colab baseline: 42,000 fit references, 9,000 tuning references and 9,000 untouched holdout references. The fixed holdout contains 30,932 true links. Extra references sampled by this notebook enter the fit fold only. Every validation reference searches the full training Source 2/3 target corpus. Candidate recall and macro F0.5 are reported separately, with no-match references included.
 
