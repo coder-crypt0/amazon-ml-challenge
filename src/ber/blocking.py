@@ -89,6 +89,7 @@ class BlockingIndex:
             raise ValueError("Blocking index version changed; rebuild in a new directory")
         self.hashes = np.load(self.path / "hashes.npy", mmap_mode="r")
         self.rows = np.load(self.path / "rows.npy", mmap_mode="r")
+        self.n_records = max(1, int(metadata["rows"]))
 
     @classmethod
     def build(cls, records, path, country="", chunk_size=250000, max_postings=150, workers=4):
@@ -175,3 +176,20 @@ class BlockingIndex:
         if limit is not None:
             raise ValueError("Rank candidates by text before applying a limit")
         return result
+
+    def query_weighted(self, record, country=""):
+        """Same candidates as query(), plus each one's summed IDF over the keys it shares.
+
+        A candidate sharing several rare keys with the query is stronger evidence than
+        one sharing a single frequent key; the ranker adds this to text similarity.
+        """
+        keys = np.asarray([key_hash(k) for k in blocking_keys(record, country)], dtype=np.uint64)
+        starts = np.searchsorted(self.hashes, keys, side="left")
+        ends = np.searchsorted(self.hashes, keys, side="right")
+        spans = [(int(s), int(e)) for s, e in zip(starts, ends) if 0 < e-s <= self.max_postings]
+        if not spans:
+            return np.empty(0, np.uint32), np.empty(0, np.float64)
+        rows = np.concatenate([self.rows[s:e] for s, e in spans])
+        weights = np.concatenate([np.full(e-s, np.log(self.n_records / (e-s))) for s, e in spans])
+        result, inverse = np.unique(rows, return_inverse=True)
+        return result, np.bincount(inverse, weights=weights, minlength=len(result))

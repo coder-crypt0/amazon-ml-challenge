@@ -90,8 +90,22 @@ def predict(data,artifacts,workers=4,batch_size=512):
     return summary
 
 
-def assemble(artifacts,output,exclusive=None):
+def select_matches(probabilities,rule):
+    """Tuned policy for one query: p>=t, plus the top candidate when p>=t1, then p>=r*best."""
+    p=np.asarray(probabilities,dtype=np.float64)
+    chosen=p>=rule["t"]
+    if len(p):
+        top=int(np.argmax(p))
+        if p[top]>=rule["t1"]:
+            chosen[top]=True
+        if rule.get("r"):
+            chosen&=p>=rule["r"]*p[top]
+    return chosen
+
+
+def assemble(artifacts,output,exclusive=None,policy=None,data=None):
     artifacts,output=Path(artifacts),Path(output)
+    policy=json.loads(Path(policy).read_text()) if policy else None
     directory=artifacts/"predictions"
     if not restore_file(directory/"COMPLETE"):
         raise ValueError("Prediction not complete; resume the prediction stage first")
@@ -104,7 +118,12 @@ def assemble(artifacts,output,exclusive=None):
     config=json.loads((artifacts/"experiment/calibration.json").read_text())
     threshold=config["threshold"]
     if exclusive is None:
-        exclusive=config.get("exclusive",False)
+        exclusive=config.get("exclusive",False) and policy is None
+    if policy is not None and exclusive:
+        raise ValueError("A tuned policy and target exclusivity are separate experiments")
+    countries={}
+    if policy is not None and policy.get("by_country"):
+        countries={r["entity_id"]:r["country"] for r in iter_records([Path(data)/"test/test_source1.tsv"])}
     owners=None
     conflicts=0
     if exclusive:
@@ -137,10 +156,15 @@ def assemble(artifacts,output,exclusive=None):
                 for i,qid in enumerate(chunk["query_ids"]):
                     start,end=chunk["offsets"][i:i+2]
                     candidates=[]; matches=[]
-                    for ri,p in zip(chunk["rows"][start:end],chunk["probabilities"][start:end]):
+                    probabilities=chunk["probabilities"][start:end]
+                    if policy is None:
+                        chosen=probabilities>=threshold
+                    else:
+                        chosen=select_matches(probabilities,policy["by_country"].get(countries.get(str(qid),""),policy["global"]))
+                    for ri,keep in zip(chunk["rows"][start:end],chosen):
                         entity_id=store[int(ri)]["entity_id"]
                         candidates.append(entity_id)
-                        if p>=threshold and (owners is None or owners[ri]==total):
+                        if keep and (owners is None or owners[ri]==total):
                             matches.append(entity_id)
                     cw.writerow([qid,",".join(candidates)])
                     mw.writerow([qid,",".join(matches)])
@@ -148,7 +172,7 @@ def assemble(artifacts,output,exclusive=None):
     for name in ("matching_results.tsv","candidate_pairs.tsv"):
         (output/(name+".tmp")).replace(output/name)
     store.close()
-    result={"queries":total,"matched_links":matched,"exclusive":exclusive,"conflicts":conflicts}
+    result={"queries":total,"matched_links":matched,"exclusive":exclusive,"conflicts":conflicts,"policy":policy}
     (output/"prediction_summary.json").write_text(json.dumps(result,indent=2))
     return result
 
@@ -162,5 +186,6 @@ if __name__=="__main__":
     p.add_argument("--workers",type=int,default=4)
     p.add_argument("--batch-size",type=int,default=512)
     p.add_argument("--exclusive",action="store_true",default=None)
+    p.add_argument("--policy",default=None,help="policy.json from scripts/tune_decision.py")
     a=p.parse_args()
-    print(json.dumps(predict(a.data,a.artifacts,a.workers,a.batch_size) if a.stage=="score" else assemble(a.artifacts,a.output,a.exclusive),indent=2))
+    print(json.dumps(predict(a.data,a.artifacts,a.workers,a.batch_size) if a.stage=="score" else assemble(a.artifacts,a.output,a.exclusive,a.policy,a.data),indent=2))

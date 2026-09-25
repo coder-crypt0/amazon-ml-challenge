@@ -35,18 +35,18 @@ print("Drive connected" if not SMOKE else "Local notebook smoke test")''')
 md('''## 1. Configuration
 Change `DATA_ZIP` to the file you uploaded. `RUN_NAME` identifies checkpoints; use a new name for a changed experiment. Default settings sample 60,000 training references against **all** target records. `RUN_COUNTRY_TRANSFER` adds two diagnostic models and can be disabled to save time.''')
 code('''DATA_ZIP = Path(os.environ.get("BER_DATA_ZIP", "/content/drive/MyDrive/amazon-ml-challenge/6ab10eb3b23ba_student_resource.zip"))
-RUN_NAME = "ber_v1"
+RUN_NAME = "ber_v2"
 TEAM_NAME = "entity_resolution"
 TEAM_MEMBERS = []  # Fill in for your final methodology.
 DRIVE_ROOT = Path(os.environ.get("BER_DRIVE_ROOT", "/content/drive/MyDrive/amazon-ml-challenge"))
 WORK = Path(os.environ.get("BER_WORK", "/content/ber_work"))
 SAMPLES = 100 if SMOKE else 60000
 TREES = 20 if SMOKE else 500
-TOP_K = 12 if SMOKE else 32
-MAX_POSTINGS = 150
-WORKERS = 1 if SMOKE else min(4, os.cpu_count() or 2)
+TOP_K = 12 if SMOKE else 96
+MAX_POSTINGS = 250
+WORKERS = 1 if SMOKE else min(8, os.cpu_count() or 2)
 BATCH_SIZE = 5 if SMOKE else 512
-RUN_COUNTRY_TRANSFER = False if SMOKE else True
+RUN_COUNTRY_TRANSFER = False  # diagnostic only; enable for the methodology report
 XGBOOST_DEVICE = "cpu" if SMOKE else "cuda"
 SEED = 20260925
 CODE = WORK / "code"
@@ -107,6 +107,28 @@ DATA = DATA_ROOT / "student_resource" / "dataset"
 assert (DATA / "train/train_ground_truth.tsv").is_file()
 print("Dataset:", DATA)
 print("Runtime disk free (GB):", round(shutil.disk_usage(WORK).free / 1e9, 1))''')
+md('''## 3b. Reuse stores and indexes from an earlier run
+Blocking keys and record normalization are unchanged since `ber_v1` (the normalization speed-up was verified output-identical on every train and test record), so its stores and indexes are reused instead of rebuilt. Anything not found is built normally by steps 4 and 9.''')
+code('''REUSE_FROM = "ber_v1"
+for split in ("train", "test"):
+    for part in ("store", "index"):
+        dst = ARTIFACTS / split / part
+        if (dst / "COMPLETE").exists():
+            continue
+        local = WORK / "artifacts" / REUSE_FROM / split / part
+        remote = DRIVE_ROOT / "runs" / REUSE_FROM / "checkpoints" / split / part
+        src = next((d for d in (local, remote) if (d / "COMPLETE").exists()), None)
+        if src is None:
+            print(f"{split}/{part}: nothing to reuse; it will be built")
+            continue
+        if dst.exists() or dst.is_symlink():
+            shutil.rmtree(dst) if dst.is_dir() and not dst.is_symlink() else dst.unlink()
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if src == local:
+            os.symlink(src, dst, target_is_directory=True)
+        else:
+            shutil.copytree(src, dst)
+        print(f"{split}/{part}: reused from {src}")''')
 md('''## 4. Build the full training search index
 This CPU stage processes all Source 2/3 records. Every 250,000-record key shard is checkpointed. The final sort is one resumable-stage boundary: if interrupted during sorting, the stored key shards are reused. The index uses ~2 GB for this dataset.''')
 code('''run("-m", "ber.build", "--data", DATA, "--artifacts", ARTIFACTS, "--split", "train", "--workers", WORKERS)''')
@@ -127,6 +149,12 @@ if RUN_COUNTRY_TRANSFER: experiment_args.append("--country-transfer")
 run(*experiment_args)
 REPORT = json.loads((ARTIFACTS / "experiment/validation.json").read_text())
 print(json.dumps({k: REPORT[k] for k in ("holdout", "holdout_by_country", "graph_ablation")}, indent=2))''')
+md('''## 7b. Tune the match-selection policy
+Per query: keep candidates with p >= t, also keep the top candidate when p >= t1, and drop candidates below r x the query's best probability; optionally per country. Chosen on the tuning split only; the holdout line is the unbiased estimate.''')
+code('''POLICY = ARTIFACTS / "experiment/policy.json"
+run("-m", "ber.policy", ARTIFACTS / "experiment", POLICY)
+shutil.copyfile(POLICY, DURABLE / "policy.json")
+print(POLICY.read_text())''')
 md('''## 8. Export report-quality figures and reconstructable JSON
 Plots are written as PNG and SVG. `validation.json` and `figures/plot_data.json` contain the underlying measurements; rerun `ber.plots` later without retraining. France has no labeled score.''')
 code('''REPORTS = CODE / "reports"
@@ -147,7 +175,8 @@ code('''run("-m", "ber.predict", "score", "--data", DATA, "--artifacts", ARTIFAC
 md('''## 11. Assemble outputs, audit every ID, and package
 The assembly stage applies the tuning-selected policy and generates both required TSVs. The strict audit verifies every Source 1 row, target existence, duplicate lists and candidate containment. Methodology and results are filled from the actual run.''')
 code('''OUTPUT = WORK / "output"
-run("-m", "ber.predict", "assemble", "--artifacts", ARTIFACTS, "--output", OUTPUT)
+run("-m", "ber.predict", "assemble", "--artifacts", ARTIFACTS, "--output", OUTPUT,
+    "--policy", ARTIFACTS / "experiment/policy.json", "--data", DATA)
 from ber.finalize import finalize
 submission, audit = finalize(DATA, ARTIFACTS, OUTPUT, CODE, TEAM_NAME, TEAM_MEMBERS)
 shutil.copytree(OUTPUT, DURABLE / "output", dirs_exist_ok=True)

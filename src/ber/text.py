@@ -5,6 +5,7 @@ from anyascii import anyascii
 
 _PUNCT = re.compile(r"[^\w\s]", re.UNICODE)
 _SPACE = re.compile(r"\s+")
+_ASCII_DROP = re.compile(r"[^0-9a-z\s]")
 LEGAL = frozenset("ltd limited llc inc incorporated corp corporation co company plc pvt private llp sarl sas sa sci eurl pte bv gmbh and the".split())
 ADDRESS_MAP = dict(pair.split(":") for pair in (
     "rd:road st:street ave:avenue av:avenue blvd:boulevard ln:lane dr:drive ct:court "
@@ -19,7 +20,12 @@ ADDRESS_COMMON = frozenset(ADDRESS_MAP.values()) | frozenset(
 def normalize(value):
     if not value:
         return ""
-    text = unicodedata.normalize("NFKD", str(value)).casefold()
+    text = str(value)
+    if text.isascii():
+        # Same result as the loop below (no marks in ASCII), without per-character
+        # unicodedata calls; most inputs are ASCII after anyascii transliteration.
+        return _SPACE.sub(" ", _ASCII_DROP.sub(" ", text.lower().replace("&", " and "))).strip()
+    text = unicodedata.normalize("NFKD", text).casefold()
     out = []
     latin_base = False
     for ch in text:
