@@ -40,6 +40,7 @@ CFG = {
     "cap_s1": 20000, "cap_t": 50000,  # postings longer than this are skipped during retrieval
     "budget_s1": 10000, "budget_t": 30000,  # per-query posting budget per field group, rarest tokens first
     "wide": 4,           # candidate pool = wide x k by partial cosine, re-ranked by exact cosine
+    "skip2": 0.005,      # stage 2 re-scores only pairs with stage-1 p >= skip2 (others keep p1)
     "rev_min": 0.1,
     "neg_keep": 0.3,     # share of easy negatives kept for training (weighted back up)
     "chunk": 3_000_000,
@@ -1284,7 +1285,7 @@ def run_train(data, work, cfg):
     s1_of = {k: np.flatnonzero(fold == k) for k in range(3)}
     ctry_all = np.array(rec["countries"][:n1], dtype=object)
 
-    def fit_stage(tag, make_x, names):
+    def fit_stage(tag, make_x, names, fallback=None):
         """Cross-fit two LightGBM models (fold 0 / fold 1). Pass 1 keeps only training and early-stopping
         rows in memory; pass 2 recomputes features for out-of-fold and validation predictions."""
         rows = np.flatnonzero(need)
@@ -1331,12 +1332,24 @@ def run_train(data, work, cfg):
             gc.collect()
         del full
         gc.collect()
-        p = np.zeros(len(sel), np.float32)
+        p = np.zeros(len(sel), np.float32) if fallback is None else fallback.astype(np.float32).copy()
         for a0, b0 in chunks:
-            Xc = make_x(a0, b0)
-            pa, pb = (mm.predict(Xc, num_iteration=mm.best_iteration, num_threads=NT) for mm in models)
-            fs = f_s[a0:b0]
-            p[a0:b0] = np.where(fs == 0, pb, np.where(fs == 1, pa, 0.5 * (pa + pb)))
+            live = np.ones(b0 - a0, bool) if fallback is None else fallback[a0:b0] >= cfg["skip2"]
+            if not live.any():
+                continue
+            Xc = make_x(a0, b0)[live]
+            fs = f_s[a0:b0][live]
+            out = np.empty(len(fs), np.float32)
+            for fv, mm in ((0, models[1]), (1, models[0])):
+                m = fs == fv
+                if m.any():
+                    out[m] = mm.predict(Xc[m], num_iteration=mm.best_iteration, num_threads=NT)
+            m = fs == 2
+            if m.any():
+                out[m] = 0.5 * sum(mm.predict(Xc[m], num_iteration=mm.best_iteration, num_threads=NT)
+                                   for mm in models)
+            view = p[a0:b0]
+            view[live] = out
         log(f"{tag}: out-of-fold predictions done")
         imp = dict(zip(names, models[0].feature_importance("gain").round(0).tolist()))
         return models, p, sorted(imp.items(), key=lambda kv: -kv[1])[:30]
@@ -1391,12 +1404,13 @@ def run_train(data, work, cfg):
         tcomp = cfg.get("tcomp", False)
         if tcomp:  # stage-1 probabilities for every graph pair (out-of-fold where the S1 was trained on)
             p_all = np.zeros(len(G["pq"]), np.float32)
-            for a0, b0 in group_chunks(G["pq"], cfg["chunk"]):
-                Xc = featurize(G, np.arange(a0, b0))
-                p_all[a0:b0] = np.mean([mm.predict(Xc, num_iteration=mm.best_iteration, num_threads=NT)
-                                        for mm in models1], 0)
-                log(f"  full-graph stage-1 {b0:,}/{len(p_all):,}")
             p_all[sel] = p1
+            rest = np.flatnonzero(pf < 0)  # whole S1 groups outside the sample
+            m0 = models1[0]
+            for a0, b0 in group_chunks(G["pq"][rest], cfg["chunk"]):
+                p_all[rest[a0:b0]] = m0.predict(featurize(G, rest[a0:b0]), num_iteration=m0.best_iteration,
+                                                num_threads=NT)
+                log(f"  full-graph stage-1 {b0:,}/{len(rest):,}")
             TC = target_p_stats(G, p_all)[sel]
             del p_all
 
@@ -1405,7 +1419,8 @@ def run_train(data, work, cfg):
             if tcomp:
                 parts.append(TC[a0:b0])
             return np.hstack(parts)
-        models2, p2, top2 = fit_stage("lgb2", x2, FEATS + COL_NAMES + (TCOMP_NAMES if tcomp else []))
+        models2, p2, top2 = fit_stage("lgb2", x2, FEATS + COL_NAMES + (TCOMP_NAMES if tcomp else []),
+                                      fallback=p1)
         np.save(os.path.join(work, "model", "val_p2.npy"), p2)
         tau2, rep2 = evaluate(p2)
         meta.update(tau2=tau2, stage2=True, tcomp=tcomp, report2=rep2, top_features2=top2)
@@ -1438,14 +1453,20 @@ def run_test(data, work, cfg, tau=None):
     P = len(G["pq"])
     chunks = group_chunks(G["pq"], cfg["chunk"])
 
-    def score(models, make_x, tag):
-        p = np.zeros(P, np.float32)
+    def score(models, make_x, tag, fallback=None):
+        p = np.zeros(P, np.float32) if fallback is None else fallback.astype(np.float32).copy()
+        skip2 = meta["cfg"].get("skip2", 0.005)
         for a0, b0 in chunks:
             if time.time() > DEADLINE:
                 log(f"WARNING: time budget reached in {tag} at {a0:,}/{P:,} pairs")
                 return p, False
-            p[a0:b0] = np.mean([m.predict(make_x(a0, b0), num_threads=NT) for m in models], 0)
-            log(f"  {tag} scored {b0:,}/{P:,}")
+            live = np.ones(b0 - a0, bool) if fallback is None else fallback[a0:b0] >= skip2
+            if not live.any():
+                continue
+            X = make_x(a0, b0)[live]
+            view = p[a0:b0]
+            view[live] = np.mean([m.predict(X, num_threads=NT) for m in models], 0)
+            log(f"  {tag} scored {b0:,}/{P:,} ({int(live.sum()):,} live)")
         return p, True
 
     def emit(p, tau_, out, variants):
@@ -1470,7 +1491,7 @@ def run_test(data, work, cfg, tau=None):
             if TC is not None:
                 parts.append(TC[a0:b0])
             return np.hstack(parts)
-        p2, ok2 = score(models2, x2, "stage2")
+        p2, ok2 = score(models2, x2, "stage2", fallback=p1)
         if ok2:
             np.save(os.path.join(work, "test_p2.npy"), p2)
             emit(p2, tau2, os.path.join(work, "output"), sorted({round(tau2 + d, 2) for d in (-0.05, 0.05, 0.1)}))
