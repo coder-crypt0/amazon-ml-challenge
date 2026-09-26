@@ -36,13 +36,13 @@ python aws_ber5.py setup --kaggle-dataset aditya32211/student-resource
 
 ## 3. Run (in the background on the machine)
 ```sh
-python aws_ber5.py run big '{"norm":2,"relfreq":true,"sample":0.6,"stage2":true,"tcomp":true,"cprior":true,"neg_keep":0.3,"budget_s1":40000,"budget_t":120000,"k_rev":10,"k_fwd":16,"k_name":8,"k_addr":8,"chunk":6000000}' 9
+python aws_ber5.py run big '{"norm":2,"relfreq":true,"core":true,"sample":0.6,"stage2":true,"tcomp":true,"cprior":true,"neg_keep":0.3,"budget_s1":40000,"budget_t":120000,"k_rev":10,"k_fwd":16,"k_name":8,"k_addr":8,"chunk":6000000}' 9
 python aws_ber5.py log big            # progress; look for "STAGE 1 REPORT" / "STAGE 2 REPORT" (val_f05)
 ```
 - A second, *diverse* run for the ensemble can follow on the same machine. Start it after `big` finishes, or
   in parallel on a 96-core machine:
   ```sh
-  python aws_ber5.py run div '{"norm":2,"relfreq":true,"sample":0.6,"stage2":true,"tcomp":true,"cprior":true,"neg_keep":0.3,"budget_s1":40000,"budget_t":120000,"k_rev":10,"k_fwd":16,"k_name":8,"k_addr":8,"chunk":6000000,"leaves":511,"min_leaf":200,"ff":0.6,"bf":0.7,"lr":0.05,"model_seed":7}' 9
+  python aws_ber5.py run div '{"norm":2,"relfreq":true,"core":true,"sample":0.6,"stage2":true,"tcomp":true,"cprior":true,"neg_keep":0.3,"budget_s1":40000,"budget_t":120000,"k_rev":10,"k_fwd":16,"k_name":8,"k_addr":8,"chunk":6000000,"leaves":511,"min_leaf":200,"ff":0.6,"bf":0.7,"lr":0.05,"model_seed":7}' 9
   ```
 - Need more time than the auto-terminate timer? Run `python aws_ber5.py extend 300`.
 

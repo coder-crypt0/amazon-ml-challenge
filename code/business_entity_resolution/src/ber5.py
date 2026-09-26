@@ -210,6 +210,23 @@ def _norm_chunk(args):
     return hashes, np.array(fields, np.int8), counts, nm, core_s, cat_s, ad, hn, nums, flags, ini
 
 
+def _core_chunk(args):
+    """Address without the country's common words (region/department/city/street type); numbers kept."""
+    countries, ads, common = args
+    words = [a.split() for a in ads]
+    toks, pos = [], []
+    for i, (c, ws) in enumerate(zip(countries, words)):
+        for j, w in enumerate(ws):
+            if not w[0].isdigit():
+                toks.append(f"{c}|a|{w}")
+                pos.append((i, j))
+    drop = set()
+    if toks:
+        hit = np.isin(pd.util.hash_array(np.array(toks, dtype=object)), common)
+        drop = {pos[k] for k in np.flatnonzero(hit)}
+    return [" ".join(w for j, w in enumerate(ws) if (i, j) not in drop) for i, ws in enumerate(words)]
+
+
 # ----------------------------------------------------------------------------- data loading
 def read_tsv(path):
     return pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False, na_filter=False,
@@ -562,7 +579,7 @@ def _pair_tok(pq, pt, rec_ptr, rec_tok, rec_w, tok_field, tok_idf, n_chunks):
     for c in prange(n_chunks):
         lo = c * step
         hi = min(n, lo + step)
-        st = np.zeros((6, 9), np.float64)
+        st = np.zeros((7, 9), np.float64)
         for i in range(lo, hi):
             st[:, :] = 0.0
             a = rec_ptr[pq[i]]
@@ -776,17 +793,17 @@ def _jacc3(r1, r2, rec_ptr, rec_tok, tok_field):
     while a < a1 or b < b1:
         if b >= b1 or (a < a1 and rec_tok[a] < rec_tok[b]):
             f = tok_field[rec_tok[a]]
-            if f == 0 or f >= 4:
+            if f == 0 or f == 4 or f == 5:
                 na[0 if f == 0 else f - 3] += 1
             a += 1
         elif a >= a1 or rec_tok[b] < rec_tok[a]:
             f = tok_field[rec_tok[b]]
-            if f == 0 or f >= 4:
+            if f == 0 or f == 4 or f == 5:
                 nb[0 if f == 0 else f - 3] += 1
             b += 1
         else:
             f = tok_field[rec_tok[a]]
-            if f == 0 or f >= 4:
+            if f == 0 or f == 4 or f == 5:
                 k = 0 if f == 0 else f - 3
                 na[k] += 1
                 nb[k] += 1
@@ -960,7 +977,7 @@ def build_graph(rec, tables, cfg, true_key=None):
 
     uniq, tok = np.unique(H, return_inverse=True)
     tok = tok.astype(np.int32).ravel()
-    del H, uniq
+    del H
     V = int(tok.max()) + 1
     tok_field = np.zeros(V, np.int8)
     tok_field[tok] = F
@@ -977,7 +994,20 @@ def build_graph(rec, tables, cfg, true_key=None):
     norm2 = np.bincount(key, weights=w * w, minlength=2 * n)
     w = (w / np.sqrt(norm2[key])).astype(np.float32)
     has_a = norm2[1::2] > 0
-    del key, grp, rec_of, F, df, tok_ctry
+    if cfg.get("core"):
+        # address words present in more than core_thr of the country's records (regions, departments, big
+        # cities, street types) become field 6: they keep their small IDF weight in the address cosine but
+        # leave the overlap statistics, sibling support and string features (France region<->department swaps)
+        common = (tok_field == 4) & (df > cfg.get("core_thr", 0.02) * Nc[tok_ctry])
+        tok_field[common] = 6
+        chash = np.sort(uniq[common])
+        cchunks = [(countries[i:i + step], R["ad"][i:i + step].tolist(), chash) for i in range(0, n, step)]
+        with Pool(NT) as pool:
+            R["adc"] = np.array([x for part in pool.map(_core_chunk, cchunks, chunksize=1) for x in part],
+                                dtype=object)
+        del cchunks
+        log(f"core address: {int(common.sum()):,} common address words")
+    del key, grp, rec_of, F, df, tok_ctry, uniq
     rec_ptr = np.zeros(n + 1, np.int64)
     rec_ptr[1:] = np.cumsum(cnt)
     _sort_within(rec_ptr, tok, w)
@@ -1145,6 +1175,8 @@ def featurize(G, sel, live=None):
     R = G["R"]
     lq, lt = (pq, pt) if live is None else (pq[live], pt[live])
     for field, sc in RF_SPEC:
+        if field == "ad" and "adc" in R:
+            field = "adc"
         a, b = R[field][lq].tolist(), R[field][lt].tolist()
         v = process.cpdist(a, b, scorer=_rf_scorer(sc), workers=NT, dtype=np.float32)
         if field == "hn":
@@ -1604,7 +1636,9 @@ def run_test(data, work, cfg, tau=None):
     with open(os.path.join(md, "meta.json")) as fh:
         meta = json.load(fh)
     assert meta["feats"] == FEATS, "feature list changed since training"
-    cfg = {**cfg, "norm": meta["cfg"].get("norm", 1), "relfreq": meta["cfg"].get("relfreq", False)}
+    mc = meta["cfg"]  # build test features exactly like the models were trained (defaults = older runs)
+    cfg = {**cfg, "norm": mc.get("norm", 1), "relfreq": mc.get("relfreq", False), "core": mc.get("core", False),
+           "core_thr": mc.get("core_thr", 0.02)}
     models1 = [Model.load(md, f"lgb_{f}") for f in (0, 1)]
     stage2 = bool(meta.get("stage2")) and all(
         os.path.exists(os.path.join(md, f"lgb2_{f}.txt")) or os.path.exists(os.path.join(md, f"lgb2_{f}.json"))
