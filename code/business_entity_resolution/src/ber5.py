@@ -908,7 +908,7 @@ TCOMP_NAMES = ["p1_trank", "p1_tmargin", "p1_tgap", "p1_tn50"]
 CPRIOR_NAMES = ["q_c2", "q_c3", "c_rank", "c_gap", "c_margin"]
 
 
-def target_p_stats(G, p_all, cprior=False):
+def target_p_stats(G, p_all, cprior=False, rows=None):
     """Competition of stage-1 probabilities among all S1 claiming the same target (full graph).
     cprior adds a copy-count prior: an entity has ~3.5 copies, so among S1 competing for an ambiguous
     target, the one with fewer confident copies (excluding this target) is the likelier owner."""
@@ -930,6 +930,8 @@ def target_p_stats(G, p_all, cprior=False):
         rk2, gp2, mg2, ct2 = (np.zeros(P, np.float32) for _ in range(4))
         _group_rank(t_order, t_ptr, -(q_c2 + q_c3), rk2, gp2, mg2, ct2)
         cols += [q_c2, q_c3, rk2, gp2, mg2]
+    if rows is not None:  # materialize only the rows that are used (saves ~3 GB on the full graph)
+        cols = [c[rows] for c in cols]
     return np.column_stack(cols).astype(np.float32)
 
 
@@ -1573,7 +1575,7 @@ def run_train(data, work, cfg):
             for a0, b0 in group_chunks(G["pq"][rest], cfg["chunk"]):
                 p_all[rest[a0:b0]] = m0.predict(featurize(G, rest[a0:b0]))
                 log(f"  full-graph stage-1 {b0:,}/{len(rest):,}")
-            TC = target_p_stats(G, p_all, cfg.get("cprior", False))[sel]
+            TC = target_p_stats(G, p_all, cfg.get("cprior", False), rows=sel)
             del p_all
 
         def x2(a0, b0, live=None):
