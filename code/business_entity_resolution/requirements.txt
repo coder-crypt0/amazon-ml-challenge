@@ -1,11 +1,7 @@
-numpy==2.2.6
-scipy==1.15.3
-scikit-learn==1.7.2
+numpy==2.0.2
+pandas==2.3.3
+numba==0.60.0
 lightgbm==4.6.0
-rapidfuzz==3.14.3
+rapidfuzz==3.14.6
 anyascii==0.3.3
-joblib==1.6.0
-threadpoolctl==3.7.0
-cloudpickle==3.1.2
-xgboost==3.0.5
-matplotlib==3.10.7
+psutil==5.9.5

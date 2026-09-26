@@ -1,5 +1,50 @@
 # Business Entity Resolution
 
+## v5 (final submission): `src/ber5.py`
+
+One self-contained script produces `output/matching_results.tsv` and `output/candidate_pairs.tsv` from the official
+data. Requirements: Python 3.12 and `requirements.txt` (the versions of the Kaggle CPU image used for the submitted run:
+4 vCPU, 31 GB RAM).
+
+```sh
+python -m pip install -r requirements.txt
+python src/ber5.py --data /path/to/student_resource/dataset --work work --stage all --cfg '{"sample":0.35,"stage2":true}'
+```
+
+`--stage train` writes `work/model/` (transliteration table, LightGBM models, threshold, validation report in
+`meta.json`); `--stage test` reads it and writes `work/output/` (stage-2 decision), `work/output_s1/` (stage-1
+fallback) and alternative-threshold files. `--budget-hours H` stops scoring after H hours and still writes valid files.
+
+Pipeline:
+1. **Normalization**: Unicode → Latin with a native-script token table learned from train ground-truth pairs
+   (Indic names transliterate the reference name token for token), AnyAscii fallback, alias split (dba/aka/fka),
+   dotted acronyms, leetspeak repair, legal-form removal for core names, address abbreviations, state names → codes,
+   null tokens, ordinals.
+2. **Tokens**: country-scoped (`country|kind|value`) so the country label is only a partition key (works for unseen
+   France). Kinds: name word, name consonant skeleton, concatenated name and its 6-char prefix, address word,
+   address number. TF-IDF weights per country; separate unit vectors for name and address.
+3. **Retrieval** (numba, two-stage):
+   - Each query spends a posting budget on its rarest tokens to build wide pools by partial cosine, then
+     re-ranks them by exact cosine over all tokens.
+   - Views: target → S1 reverse view (top 8; every target belongs to at most one S1) ∪ S1 → target views (top 12
+     by name+address, top 6 by name, top 6 by address).
+   - The union is `candidate_pairs.tsv`, exactly the pairs the model scores.
+4. **Features** (~115): exact per-field cosines and IDF token statistics, house-number geometry, acronym match,
+   RapidFuzz name/address similarities, name-ambiguity counts, *competition* features (rank/gap/margin of each pair
+   among all S1 competing for the same target and among the S1's own candidates), and cross-source support of the
+   target's extra tokens and of the S1 tokens it lacks. Copies of a sibling business share their changed name
+   word and house number, and all lack the S1's own.
+5. **Model**: LightGBM, two models cross-fitted on disjoint S1 folds. Training uses a graph with 19% of train S1
+   removed so their copies become distractors (test has ~2x the distractor density of train).
+   **Stage 2** adds the stage-1 probability and collective features (agreement with the S1's confident
+   co-candidates) and cross-fits two more models.
+6. **Decision**: each target is kept only for its highest-probability S1 (targets never belong to two S1), then a
+   threshold tuned on out-of-fold macro F0.5; singletons stay empty.
+
+No external data, APIs or pretrained weights are used.
+
+## Earlier pipelines (not used for the final submission)
+
 Resumable multi-pass retrieval, 47-feature LightGBM/XGBoost matching, macro-F0.5 calibration, and validation-selected target exclusivity. Uses supplied data only. Country labels are open strings, including unseen France.
 
 ## v3: IDF token retrieval (recommended)
