@@ -894,10 +894,13 @@ def collective(G, sel, p1):
 
 
 TCOMP_NAMES = ["p1_trank", "p1_tmargin", "p1_tgap", "p1_tn50"]
+CPRIOR_NAMES = ["q_c2", "q_c3", "c_rank", "c_gap", "c_margin"]
 
 
-def target_p_stats(G, p_all):
-    """Competition of stage-1 probabilities among all S1 claiming the same target (full graph)."""
+def target_p_stats(G, p_all, cprior=False):
+    """Competition of stage-1 probabilities among all S1 claiming the same target (full graph).
+    cprior adds a copy-count prior: an entity has ~3.5 copies, so among S1 competing for an ambiguous
+    target, the one with fewer confident copies (excluding this target) is the likelier owner."""
     pt = G["pt"]
     P = len(pt)
     t_order = np.argsort(pt, kind="stable").astype(np.int64)
@@ -906,7 +909,17 @@ def target_p_stats(G, p_all):
     rk, gp, mg, ct = (np.zeros(P, np.float32) for _ in range(4))
     _group_rank(t_order, t_ptr, p_all.astype(np.float32), rk, gp, mg, ct)
     n50 = np.bincount(pt, weights=(p_all >= 0.5), minlength=G["n"])[pt]
-    return np.column_stack([rk, mg, gp, n50]).astype(np.float32)
+    cols = [rk, mg, gp, n50]
+    if cprior:
+        pq, n1 = G["pq"], G["n1"]
+        conf = p_all >= 0.5
+        s2 = G["src"][pt] == 2
+        q_c2 = (np.bincount(pq, weights=conf & s2, minlength=n1)[pq] - (conf & s2)).astype(np.float32)
+        q_c3 = (np.bincount(pq, weights=conf & ~s2, minlength=n1)[pq] - (conf & ~s2)).astype(np.float32)
+        rk2, gp2, mg2, ct2 = (np.zeros(P, np.float32) for _ in range(4))
+        _group_rank(t_order, t_ptr, -(q_c2 + q_c3), rk2, gp2, mg2, ct2)
+        cols += [q_c2, q_c3, rk2, gp2, mg2]
+    return np.column_stack(cols).astype(np.float32)
 
 
 # ----------------------------------------------------------------------------- graph construction
@@ -1514,7 +1527,7 @@ def run_train(data, work, cfg):
             for a0, b0 in group_chunks(G["pq"][rest], cfg["chunk"]):
                 p_all[rest[a0:b0]] = m0.predict(featurize(G, rest[a0:b0]))
                 log(f"  full-graph stage-1 {b0:,}/{len(rest):,}")
-            TC = target_p_stats(G, p_all)[sel]
+            TC = target_p_stats(G, p_all, cfg.get("cprior", False))[sel]
             del p_all
 
         def x2(a0, b0):
@@ -1522,11 +1535,13 @@ def run_train(data, work, cfg):
             if tcomp:
                 parts.append(TC[a0:b0])
             return np.hstack(parts)
-        models2, p2, top2 = fit_stage("lgb2", x2, FEATS + COL_NAMES + (TCOMP_NAMES if tcomp else []),
+        tc_names = (TCOMP_NAMES + (CPRIOR_NAMES if cfg.get("cprior") else [])) if tcomp else []
+        models2, p2, top2 = fit_stage("lgb2", x2, FEATS + COL_NAMES + tc_names,
                                       fallback=p1)
         np.save(os.path.join(work, "model", "val_p2.npy"), p2)
         tau2, rep2 = evaluate(p2)
-        meta.update(tau2=tau2, stage2=True, tcomp=tcomp, report2=rep2, top_features2=top2)
+        meta.update(tau2=tau2, stage2=True, tcomp=tcomp, cprior=bool(tcomp and cfg.get("cprior")),
+                    report2=rep2, top_features2=top2)
         with open(os.path.join(work, "model", "meta.json"), "w") as fh:
             json.dump(meta, fh, indent=1)
         log("STAGE 2 REPORT " + json.dumps(rep2, indent=1))
@@ -1587,7 +1602,7 @@ def run_test(data, work, cfg, tau=None):
     emit(p1, tau1, os.path.join(work, "output_s1"), sorted({round(tau1 + d, 2) for d in (-0.05, 0.05, 0.1)}))
     if stage2 and ok1:
         tau2 = float(meta["tau2"] if tau is None else tau)
-        TC = target_p_stats(G, p1) if meta.get("tcomp") else None
+        TC = target_p_stats(G, p1, meta.get("cprior", False)) if meta.get("tcomp") else None
 
         def x2(a0, b0):
             idx = np.arange(a0, b0)
