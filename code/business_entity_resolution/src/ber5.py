@@ -1081,6 +1081,10 @@ def build_graph(rec, tables, cfg, true_key=None):
     t_counts = key[~is1].value_counts()
     nf_s1 = key.map(s1_counts).fillna(0).to_numpy(np.float32)
     nf_t = key.map(t_counts).fillna(0).to_numpy(np.float32)
+    if cfg.get("relfreq"):  # per 100k records of the country: comparable across country sizes (unseen France)
+        cs = pd.Series(countries)
+        nf_s1 = nf_s1 / cs.map(cs[is1].value_counts()).to_numpy(np.float32) * 1e5
+        nf_t = nf_t / cs.map(cs[~is1].value_counts()).to_numpy(np.float32) * 1e5
     del key
 
     del cos
@@ -1598,7 +1602,7 @@ def run_test(data, work, cfg, tau=None):
     with open(os.path.join(md, "meta.json")) as fh:
         meta = json.load(fh)
     assert meta["feats"] == FEATS, "feature list changed since training"
-    cfg = {**cfg, "norm": meta["cfg"].get("norm", 1)}
+    cfg = {**cfg, "norm": meta["cfg"].get("norm", 1), "relfreq": meta["cfg"].get("relfreq", False)}
     models1 = [Model.load(md, f"lgb_{f}") for f in (0, 1)]
     stage2 = bool(meta.get("stage2")) and all(
         os.path.exists(os.path.join(md, f"lgb2_{f}.txt")) or os.path.exists(os.path.join(md, f"lgb2_{f}.json"))
