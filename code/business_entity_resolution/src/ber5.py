@@ -1349,9 +1349,15 @@ class Model:
         return m
 
 
-def _Batches(X, idx, y, w, names, batch=1_000_000):
+def _Batches(X, idx, y, w, names, batch=1_000_000, gpu=True):
     """xgboost.DataIter over rows idx of a float16 matrix, converted to float32 one batch at a time."""
     import xgboost as xgb
+    cp = None
+    if GPU and gpu:
+        try:
+            import cupy as cp
+        except ImportError:
+            cp = None
 
     class It(xgb.DataIter):
         def __init__(self):
@@ -1365,6 +1371,8 @@ def _Batches(X, idx, y, w, names, batch=1_000_000):
             kw = {"data": X[sl].astype(np.float32), "label": y[sl], "feature_names": names}
             if w is not None:
                 kw["weight"] = w[sl]
+            if cp is not None:  # GPU: the quantized matrix is built on the device, not in host RAM
+                kw = {k: (cp.asarray(v) if k != "feature_names" else v) for k, v in kw.items()}
             input_data(**kw)
             self.pos += batch
             return True
@@ -1495,8 +1503,13 @@ def run_train(data, work, cfg):
                 tr = np.flatnonzero(take[rows] & (f_s[rows] == f))
                 es = np.flatnonzero(es_p[rows] & (f_s[rows] == f))
                 # batches from the float16 matrix: no full float32 copy of the training rows
-                dtr = xgb.QuantileDMatrix(_Batches(X, tr, y[rows], wts[rows], names), max_bin=256)
-                dva = xgb.QuantileDMatrix(_Batches(X, es, y[rows], None, names), ref=dtr)
+                try:
+                    dtr = xgb.QuantileDMatrix(_Batches(X, tr, y[rows], wts[rows], names), max_bin=256)
+                    dva = xgb.QuantileDMatrix(_Batches(X, es, y[rows], None, names), ref=dtr)
+                except Exception as e:  # device batches unavailable: host batches
+                    log(f"GPU DMatrix failed ({e}); using host batches")
+                    dtr = xgb.QuantileDMatrix(_Batches(X, tr, y[rows], wts[rows], names, gpu=False), max_bin=256)
+                    dva = xgb.QuantileDMatrix(_Batches(X, es, y[rows], None, names, gpu=False), ref=dtr)
                 b = xgb.train(xp, dtr, cfg["rounds"], evals=[(dva, "es")], early_stopping_rounds=cfg["es"],
                               verbose_eval=200)
                 best = b.best_iteration
