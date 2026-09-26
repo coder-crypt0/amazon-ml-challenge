@@ -1311,6 +1311,32 @@ class Model:
         return m
 
 
+def _Batches(X, idx, y, w, names, batch=1_000_000):
+    """xgboost.DataIter over rows idx of a float16 matrix, converted to float32 one batch at a time."""
+    import xgboost as xgb
+
+    class It(xgb.DataIter):
+        def __init__(self):
+            self.pos = 0
+            super().__init__()
+
+        def next(self, input_data):
+            if self.pos >= len(idx):
+                return False
+            sl = idx[self.pos:self.pos + batch]
+            kw = {"data": X[sl].astype(np.float32), "label": y[sl], "feature_names": names}
+            if w is not None:
+                kw["weight"] = w[sl]
+            input_data(**kw)
+            self.pos += batch
+            return True
+
+        def reset(self):
+            self.pos = 0
+
+    return It()
+
+
 # ----------------------------------------------------------------------------- train stage
 def run_train(data, work, cfg):
     import lightgbm as lgb
@@ -1430,9 +1456,9 @@ def run_train(data, work, cfg):
             for f in (0, 1):
                 tr = np.flatnonzero(take[rows] & (f_s[rows] == f))
                 es = np.flatnonzero(es_p[rows] & (f_s[rows] == f))
-                dtr = xgb.QuantileDMatrix(X[tr].astype(np.float32), y[rows][tr], weight=wts[rows][tr],
-                                          feature_names=names, max_bin=256)
-                dva = xgb.QuantileDMatrix(X[es].astype(np.float32), y[rows][es], ref=dtr, feature_names=names)
+                # batches from the float16 matrix: no full float32 copy of the training rows
+                dtr = xgb.QuantileDMatrix(_Batches(X, tr, y[rows], wts[rows], names), max_bin=256)
+                dva = xgb.QuantileDMatrix(_Batches(X, es, y[rows], None, names), ref=dtr)
                 b = xgb.train(xp, dtr, cfg["rounds"], evals=[(dva, "es")], early_stopping_rounds=cfg["es"],
                               verbose_eval=200)
                 best = b.best_iteration
