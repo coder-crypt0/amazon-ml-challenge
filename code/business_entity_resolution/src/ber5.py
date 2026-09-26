@@ -1203,6 +1203,85 @@ def tune_tau(qi, y, p, keep, nt, grid=None):
     return best, scores
 
 
+# ----------------------------------------------------------------------------- models
+def _gpu():
+    try:
+        import subprocess
+        return subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True, timeout=20).returncode == 0
+    except Exception:
+        return False
+
+
+GPU = _gpu()
+
+
+class Model:
+    """LightGBM or XGBoost booster behind one predict(); XGBoost trains and predicts on the GPU if present."""
+
+    def __init__(self, kind, booster, best=None):
+        self.kind, self.b, self.best = kind, booster, best
+        self.fil = None  # RAPIDS FIL (GPU) for LightGBM models, verified against LightGBM on first use
+
+    def _fil_predict(self, X):
+        import cupy as cp
+        out = self.fil.predict_proba(cp.asarray(np.ascontiguousarray(X, dtype=np.float32)))
+        out = cp.asnumpy(out) if hasattr(out, "__cuda_array_interface__") else np.asarray(out)
+        return out[:, 1] if out.ndim == 2 else out
+
+    def predict(self, X):
+        if self.kind == "lgb":
+            if self.fil is not None:
+                try:
+                    if not getattr(self, "checked", False):
+                        k = min(len(X), 4000)
+                        diff = np.abs(self._fil_predict(X[:k]) - self.b.predict(X[:k], num_threads=NT)).max()
+                        self.checked = True
+                        log(f"FIL vs LightGBM max diff {diff:.2e}")
+                        if diff > 1e-3:
+                            raise ValueError("FIL mismatch")
+                    return self._fil_predict(X)
+                except Exception as e:
+                    log(f"FIL disabled ({e}); using LightGBM on CPU")
+                    self.fil = None
+            return self.b.predict(X, num_iteration=self.best, num_threads=NT)
+        X = np.ascontiguousarray(X, dtype=np.float32)
+        if GPU:
+            try:
+                import cupy as cp
+                return cp.asnumpy(self.b.inplace_predict(cp.asarray(X)))
+            except ImportError:
+                pass
+        return self.b.inplace_predict(X)
+
+    def gain(self, names):
+        if self.kind == "lgb":
+            return dict(zip(names, self.b.feature_importance("gain").round(0).tolist()))
+        sc = self.b.get_score(importance_type="total_gain")
+        return {n: round(float(sc.get(n, 0.0)), 0) for n in names}
+
+    @staticmethod
+    def load(md, stem):
+        if os.path.exists(os.path.join(md, stem + ".json")):
+            import xgboost as xgb
+            b = xgb.Booster(model_file=os.path.join(md, stem + ".json"))
+            b.set_param({"device": "cuda" if GPU else "cpu", "nthread": NT})
+            return Model("xgb", b)
+        import lightgbm as lgb
+        path = os.path.join(md, stem + ".txt")
+        m = Model("lgb", lgb.Booster(model_file=path))
+        if GPU:
+            try:
+                from cuml.fil import ForestInference
+                try:
+                    m.fil = ForestInference.load(path, model_type="lightgbm", is_classifier=True)
+                except TypeError:
+                    m.fil = ForestInference.load(path, model_type="lightgbm", output_class=True)
+                log(f"{stem}: GPU FIL inference")
+            except Exception as e:
+                log(f"{stem}: FIL unavailable ({e})")
+        return m
+
+
 # ----------------------------------------------------------------------------- train stage
 def run_train(data, work, cfg):
     import lightgbm as lgb
@@ -1310,28 +1389,54 @@ def run_train(data, work, cfg):
             def __len__(self):
                 return len(self.arr)
 
-        # bin once, drop the float matrix, then train each fold on subset views of the binned data
-        full = lgb.Dataset(Rows(X), y[rows], weight=np.where(es_p[rows], 1.0, wts[rows]), feature_name=names,
-                           params=params, free_raw_data=True)
-        full.construct()
-        del X
-        gc.collect()
-        log(f"{tag}: binned dataset built")
         models = []
-        for f in (0, 1):
-            tr = np.flatnonzero(take[rows] & (f_s[rows] == f))
-            es = np.flatnonzero(es_p[rows] & (f_s[rows] == f))
-            dtr = full.subset(tr)
-            dva = full.subset(es)
-            mdl = lgb.train(params, dtr, cfg["rounds"], valid_sets=[dva],
-                            callbacks=[lgb.early_stopping(cfg["es"], verbose=False), lgb.log_evaluation(200)])
-            log(f"{tag} model {f}: {mdl.best_iteration} rounds, train rows {len(tr):,}, es rows {len(es):,}")
-            mdl.save_model(os.path.join(work, "model", f"{tag}_{f}.txt"), num_iteration=mdl.best_iteration)
-            models.append(mdl)
-            del dtr, dva
+        if cfg.get("model", "lgb") == "xgb":
+            import xgboost as xgb
+            xp = {"objective": "binary:logistic", "eval_metric": "logloss", "tree_method": "hist",
+                  "device": "cuda" if GPU else "cpu", "grow_policy": "lossguide", "max_depth": 0,
+                  "max_leaves": cfg["leaves"], "eta": cfg["lr"], "subsample": cfg.get("bf", 0.8),
+                  "colsample_bytree": cfg.get("ff", 0.7), "min_child_weight": cfg.get("mcw", 2.0),
+                  "lambda": cfg.get("l2", 1.0), "max_bin": 256, "seed": cfg.get("model_seed", cfg["seed"]),
+                  "nthread": NT}
+            for f in (0, 1):
+                tr = np.flatnonzero(take[rows] & (f_s[rows] == f))
+                es = np.flatnonzero(es_p[rows] & (f_s[rows] == f))
+                dtr = xgb.QuantileDMatrix(X[tr].astype(np.float32), y[rows][tr], weight=wts[rows][tr],
+                                          feature_names=names, max_bin=256)
+                dva = xgb.QuantileDMatrix(X[es].astype(np.float32), y[rows][es], ref=dtr, feature_names=names)
+                b = xgb.train(xp, dtr, cfg["rounds"], evals=[(dva, "es")], early_stopping_rounds=cfg["es"],
+                              verbose_eval=200)
+                best = b.best_iteration
+                b = b[: best + 1]
+                b.save_model(os.path.join(work, "model", f"{tag}_{f}.json"))
+                log(f"{tag} xgb model {f} ({xp['device']}): {best + 1} rounds, train rows {len(tr):,}")
+                models.append(Model("xgb", b))
+                del dtr, dva
+                gc.collect()
+            del X
             gc.collect()
-        del full
-        gc.collect()
+        else:
+            # bin once, drop the float matrix, then train each fold on subset views of the binned data
+            full = lgb.Dataset(Rows(X), y[rows], weight=np.where(es_p[rows], 1.0, wts[rows]), feature_name=names,
+                               params=params, free_raw_data=True)
+            full.construct()
+            del X
+            gc.collect()
+            log(f"{tag}: binned dataset built")
+            for f in (0, 1):
+                tr = np.flatnonzero(take[rows] & (f_s[rows] == f))
+                es = np.flatnonzero(es_p[rows] & (f_s[rows] == f))
+                dtr = full.subset(tr)
+                dva = full.subset(es)
+                mdl = lgb.train(params, dtr, cfg["rounds"], valid_sets=[dva],
+                                callbacks=[lgb.early_stopping(cfg["es"], verbose=False), lgb.log_evaluation(200)])
+                log(f"{tag} model {f}: {mdl.best_iteration} rounds, train rows {len(tr):,}, es rows {len(es):,}")
+                mdl.save_model(os.path.join(work, "model", f"{tag}_{f}.txt"), num_iteration=mdl.best_iteration)
+                models.append(Model("lgb", mdl, mdl.best_iteration))
+                del dtr, dva
+                gc.collect()
+            del full
+            gc.collect()
         p = np.zeros(len(sel), np.float32) if fallback is None else fallback.astype(np.float32).copy()
         for a0, b0 in chunks:
             live = np.ones(b0 - a0, bool) if fallback is None else fallback[a0:b0] >= cfg["skip2"]
@@ -1343,15 +1448,14 @@ def run_train(data, work, cfg):
             for fv, mm in ((0, models[1]), (1, models[0])):
                 m = fs == fv
                 if m.any():
-                    out[m] = mm.predict(Xc[m], num_iteration=mm.best_iteration, num_threads=NT)
+                    out[m] = mm.predict(Xc[m])
             m = fs == 2
             if m.any():
-                out[m] = 0.5 * sum(mm.predict(Xc[m], num_iteration=mm.best_iteration, num_threads=NT)
-                                   for mm in models)
+                out[m] = 0.5 * sum(mm.predict(Xc[m]) for mm in models)
             view = p[a0:b0]
             view[live] = out
         log(f"{tag}: out-of-fold predictions done")
-        imp = dict(zip(names, models[0].feature_importance("gain").round(0).tolist()))
+        imp = models[0].gain(names)
         return models, p, sorted(imp.items(), key=lambda kv: -kv[1])[:30]
 
     def evaluate(p):
@@ -1408,8 +1512,7 @@ def run_train(data, work, cfg):
             rest = np.flatnonzero(pf < 0)  # whole S1 groups outside the sample
             m0 = models1[0]
             for a0, b0 in group_chunks(G["pq"][rest], cfg["chunk"]):
-                p_all[rest[a0:b0]] = m0.predict(featurize(G, rest[a0:b0]), num_iteration=m0.best_iteration,
-                                                num_threads=NT)
+                p_all[rest[a0:b0]] = m0.predict(featurize(G, rest[a0:b0]))
                 log(f"  full-graph stage-1 {b0:,}/{len(rest):,}")
             TC = target_p_stats(G, p_all)[sel]
             del p_all
@@ -1432,16 +1535,17 @@ def run_train(data, work, cfg):
 
 # ----------------------------------------------------------------------------- test stage
 def run_test(data, work, cfg, tau=None):
-    import lightgbm as lgb
     md = os.path.join(work, "model")
     with open(os.path.join(md, "translit.json"), encoding="utf-8") as fh:
         tables = json.load(fh)
     with open(os.path.join(md, "meta.json")) as fh:
         meta = json.load(fh)
     assert meta["feats"] == FEATS, "feature list changed since training"
-    models1 = [lgb.Booster(model_file=os.path.join(md, f"lgb_{f}.txt")) for f in (0, 1)]
-    stage2 = bool(meta.get("stage2")) and all(os.path.exists(os.path.join(md, f"lgb2_{f}.txt")) for f in (0, 1))
-    models2 = [lgb.Booster(model_file=os.path.join(md, f"lgb2_{f}.txt")) for f in (0, 1)] if stage2 else []
+    models1 = [Model.load(md, f"lgb_{f}") for f in (0, 1)]
+    stage2 = bool(meta.get("stage2")) and all(
+        os.path.exists(os.path.join(md, f"lgb2_{f}.txt")) or os.path.exists(os.path.join(md, f"lgb2_{f}.json"))
+        for f in (0, 1))
+    models2 = [Model.load(md, f"lgb2_{f}") for f in (0, 1)] if stage2 else []
     rec = load_split(data, "test")
     if cfg.get("subsample", 1.0) < 1.0:
         rec = subset(rec, unit_hash(rec["ids"].tolist(), "sub") < cfg["subsample"])
@@ -1465,7 +1569,7 @@ def run_test(data, work, cfg, tau=None):
                 continue
             X = make_x(a0, b0)[live]
             view = p[a0:b0]
-            view[live] = np.mean([m.predict(X, num_threads=NT) for m in models], 0)
+            view[live] = np.mean([m.predict(X) for m in models], 0)
             log(f"  {tag} scored {b0:,}/{P:,} ({int(live.sum()):,} live)")
         return p, True
 
