@@ -80,11 +80,21 @@ LEGAL = frozenset(
     "private limited pvt ltd llc inc incorporated corp corporation co company llp lp plc pllc pc pa the and of "
     "sarl sas sasu eurl sa sci snc selarl ei scp gie scop sel ets gmbh com net org www in biz info m s dr smt shri sri "
     "mr mrs ms".split())
-ABBR = dict(p.split(":") for p in (
+# Normalization v1 (models trained before 26 Sep 18:00) expands St -> street and Ste -> suite; v2 maps
+# Street/Saint -> st and Suite/Sainte -> ste, so French "St-Denis"/"Saint-Denis" (and "St. Louis") agree.
+ABBR_V1 = dict(p.split(":") for p in (
     "st:street str:street rd:road ave:avenue av:avenue blvd:boulevard ln:lane dr:drive ct:court cir:circle "
     "hwy:highway pkwy:parkway ter:terrace trl:trail pl:place sq:square mt:mount ft:fort n:north s:south "
     "e:east w:west ne:northeast nw:northwest se:southeast sw:southwest nr:near opp:opposite marg:road "
     "r:rue bd:boulevard rte:route che:chemin ch:chemin imp:impasse fbg:faubourg ste:suite apt:apartment "
+    "fl:floor bldg:building ctr:center cntr:center expy:expressway fwy:freeway jct:junction jn:junction "
+    "sec:sector stn:station rly:railway ngr:nagar hno:no dno:no").split())
+ABBR = dict(p.split(":") for p in (
+    "street:st str:st saint:st sainte:ste suite:ste rd:road ave:avenue av:avenue blvd:boulevard bld:boulevard "
+    "boul:boulevard ln:lane dr:drive ct:court cir:circle qu:quai crs:cours chem:chemin mte:montee res:residence "
+    "hwy:highway pkwy:parkway ter:terrace trl:trail pl:place sq:square mt:mount ft:fort n:north s:south "
+    "e:east w:west ne:northeast nw:northwest se:southeast sw:southwest nr:near opp:opposite marg:road "
+    "r:rue bd:boulevard rte:route che:chemin ch:chemin imp:impasse fbg:faubourg apt:apartment "
     "fl:floor bldg:building ctr:center cntr:center expy:expressway fwy:freeway jct:junction jn:junction "
     "sec:sector stn:station rly:railway ngr:nagar hno:no dno:no").split())
 # Full state names -> postal codes (generic address normalization; both spellings occur in the data).
@@ -106,7 +116,7 @@ _STATES_RE = re.compile(r"\b(" + "|".join(sorted(map(re.escape, STATES), key=len
 # Token fields: 0 name word, 1 name skeleton, 2 whole concatenated name, 3 its 6-char prefix,
 # 4 address word, 5 address number.  Fields 0-3 form the name vector, 4-5 the address vector.
 FIELD_W = np.array([1.0, 0.5, 1.0, 0.5, 1.0, 1.0])
-_TAB = ({}, {})
+_TAB = ({}, {}, None)
 
 
 def _init_worker(tables):
@@ -138,7 +148,8 @@ def norm_name(raw, table):
     return toks, core
 
 
-def norm_addr(raw, table):
+def norm_addr(raw, table, abbr=None):
+    abbr = ABBR if abbr is None else abbr
     raw = _NUMERO.sub(" no ", _NULLS.sub(" ", raw or ""))
     text = _ORDINAL.sub(r"\1", _latin(raw, table))
     text = _STATES_RE.sub(lambda m: STATES[m.group(0)], text)
@@ -148,7 +159,7 @@ def norm_addr(raw, table):
             t = t.lstrip("0") or "0"
             nums.append(t)
         else:
-            t = ABBR.get(t, t)
+            t = abbr.get(t, t)
             words.append(t)
         seq.append(t)
     return seq, words, nums
@@ -160,7 +171,7 @@ def skeleton(t):
 
 def _norm_chunk(args):
     names, addrs, countries = args
-    tname, taddr = _TAB
+    tname, taddr, abbr = _TAB
     n = len(names)
     toks_all, fields, counts = [], [], np.zeros(n, np.int32)
     nm, core_s, cat_s, ad, hn, ini = [], [], [], [], [], []
@@ -169,7 +180,7 @@ def _norm_chunk(args):
     for i in range(n):
         rn, ra, c = names[i] or "", addrs[i] or "", countries[i]
         toks, core = norm_name(rn, tname)
-        seq, words, numl = norm_addr(ra, taddr)
+        seq, words, numl = norm_addr(ra, taddr, abbr)
         base = core or toks
         cat = "".join(base)
         before = len(toks_all)
@@ -929,7 +940,7 @@ def build_graph(rec, tables, cfg, true_key=None):
     names, addrs, countries = rec["names"], rec["addrs"], rec["countries"]
     step = 100_000
     chunks = [(names[i:i + step], addrs[i:i + step], countries[i:i + step]) for i in range(0, n, step)]
-    with Pool(NT, initializer=_init_worker, initargs=((tables["name"], tables["addr"]),)) as pool:
+    with Pool(NT, initializer=_init_worker, initargs=((tables["name"], tables["addr"], ABBR if cfg.get("norm", 1) >= 2 else ABBR_V1),)) as pool:
         res = pool.map(_norm_chunk, chunks, chunksize=1)
     del chunks, names, addrs
     rec.pop("names", None)  # raw text is no longer needed; free it before the heavy stages
@@ -1556,6 +1567,7 @@ def run_test(data, work, cfg, tau=None):
     with open(os.path.join(md, "meta.json")) as fh:
         meta = json.load(fh)
     assert meta["feats"] == FEATS, "feature list changed since training"
+    cfg = {**cfg, "norm": meta["cfg"].get("norm", 1)}
     models1 = [Model.load(md, f"lgb_{f}") for f in (0, 1)]
     stage2 = bool(meta.get("stage2")) and all(
         os.path.exists(os.path.join(md, f"lgb2_{f}.txt")) or os.path.exists(os.path.join(md, f"lgb2_{f}.json"))
