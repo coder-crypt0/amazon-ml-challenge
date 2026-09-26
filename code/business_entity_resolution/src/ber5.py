@@ -1119,7 +1119,7 @@ def _rf_scorer(name):
             "jw": JaroWinkler.normalized_similarity, "lev": Levenshtein.distance}[name]
 
 
-def featurize(G, sel):
+def featurize(G, sel, live=None):
     """Feature matrix for the pairs `sel` (index array, sorted, made of whole S1 groups)."""
     from rapidfuzz import process
     pq, pt = G["pq"][sel], G["pt"][sel]
@@ -1137,12 +1137,17 @@ def featurize(G, sel):
     X[:, c:c + N_SUP] = _support(qptr, pq, pt, G["src"][pt], G["rec_ptr"], G["tok"], G["tok_field"],
                                  G["tok_idf"]); c += N_SUP
     R = G["R"]
+    lq, lt = (pq, pt) if live is None else (pq[live], pt[live])
     for field, sc in RF_SPEC:
-        a, b = R[field][pq].tolist(), R[field][pt].tolist()
+        a, b = R[field][lq].tolist(), R[field][lt].tolist()
         v = process.cpdist(a, b, scorer=_rf_scorer(sc), workers=NT, dtype=np.float32)
         if field == "hn":
-            v = np.where((R["hn"][pq] == "") | (R["hn"][pt] == ""), np.nan, v)
-        X[:, c] = v
+            v = np.where((R["hn"][lq] == "") | (R["hn"][lt] == ""), np.nan, v)
+        if live is None:
+            X[:, c] = v
+        else:
+            X[:, c] = np.nan
+            X[live, c] = v
         c += 1
     hq, ht = G["nums"][pq, 0], G["nums"][pt, 0]
     both = (hq >= 0) & (ht >= 0)
@@ -1466,7 +1471,7 @@ def run_train(data, work, cfg):
             live = np.ones(b0 - a0, bool) if fallback is None else fallback[a0:b0] >= cfg["skip2"]
             if not live.any():
                 continue
-            Xc = make_x(a0, b0)[live]
+            Xc = make_x(a0, b0, None if fallback is None else live)[live]
             fs = f_s[a0:b0][live]
             out = np.empty(len(fs), np.float32)
             for fv, mm in ((0, models[1]), (1, models[0])):
@@ -1513,7 +1518,7 @@ def run_train(data, work, cfg):
 
     base = {"pairs_per_s1": len(G["pq"]) / n1, "pair_recall": float(y_all.sum() / len(true_key)),
             "targets_per_s1_train": tgt_per_s1}
-    models1, p1, top1 = fit_stage("lgb", lambda a0, b0: featurize(G, sel[a0:b0]), FEATS)
+    models1, p1, top1 = fit_stage("lgb", lambda a0, b0, live=None: featurize(G, sel[a0:b0], live), FEATS)
     np.save(os.path.join(work, "model", "val_p1.npy"), p1)
     # validation pairs for cross-run ensembling (keys, labels, fold) and true counts of sampled S1
     np.save(os.path.join(work, "model", "val_keys.npy"), (pq_s.astype(np.int64) << 32) | pt_s.astype(np.int64))
@@ -1541,8 +1546,8 @@ def run_train(data, work, cfg):
             TC = target_p_stats(G, p_all, cfg.get("cprior", False))[sel]
             del p_all
 
-        def x2(a0, b0):
-            parts = [featurize(G, sel[a0:b0]), collective(G, sel[a0:b0], p1[a0:b0])]
+        def x2(a0, b0, live=None):
+            parts = [featurize(G, sel[a0:b0], live), collective(G, sel[a0:b0], p1[a0:b0])]
             if tcomp:
                 parts.append(TC[a0:b0])
             return np.hstack(parts)
@@ -1594,7 +1599,7 @@ def run_test(data, work, cfg, tau=None):
             live = np.ones(b0 - a0, bool) if fallback is None else fallback[a0:b0] >= skip2
             if not live.any():
                 continue
-            X = make_x(a0, b0)[live]
+            X = make_x(a0, b0, None if fallback is None else live)[live]
             view = p[a0:b0]
             view[live] = np.mean([m.predict(X) for m in models], 0)
             log(f"  {tag} scored {b0:,}/{P:,} ({int(live.sum()):,} live)")
@@ -1607,7 +1612,7 @@ def run_test(data, work, cfg, tau=None):
             write_outputs(rec["ids"], G["n1"], G["pq"], G["pt"], p, t, out, cand=False, suffix=f"_t{t:.2f}")
 
     tau1 = float(meta["tau"] if tau is None else tau)
-    p1, ok1 = score(models1, lambda a0, b0: featurize(G, np.arange(a0, b0)), "stage1")
+    p1, ok1 = score(models1, lambda a0, b0, live=None: featurize(G, np.arange(a0, b0), live), "stage1")
     np.save(os.path.join(work, "test_p1.npy"), p1)
     np.save(os.path.join(work, "test_pq.npy"), G["pq"])
     np.save(os.path.join(work, "test_pt.npy"), G["pt"])
@@ -1616,9 +1621,9 @@ def run_test(data, work, cfg, tau=None):
         tau2 = float(meta["tau2"] if tau is None else tau)
         TC = target_p_stats(G, p1, meta.get("cprior", False)) if meta.get("tcomp") else None
 
-        def x2(a0, b0):
+        def x2(a0, b0, live=None):
             idx = np.arange(a0, b0)
-            parts = [featurize(G, idx), collective(G, idx, p1[a0:b0])]
+            parts = [featurize(G, idx, live), collective(G, idx, p1[a0:b0])]
             if TC is not None:
                 parts.append(TC[a0:b0])
             return np.hstack(parts)
